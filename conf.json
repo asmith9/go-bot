@@ -1,0 +1,9 @@
+{
+    "Server":"localhost:6667",
+    "SSL":false,
+    "Nick":"gobot",
+    "Username":"gobot",
+    "RoomName":"#monkey",
+    "IgnoreRegex":"^gobot",
+    "debug":true
+}

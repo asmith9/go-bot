@@ -6,5 +6,7 @@
     "RoomName":"#monkey",
     "IgnoreRegex":"^gobot",
     "debug":true,
-    "HelloMessage":"Hi Room!"
+    "HelloMessage":"Hi Room!",
+    "Driver":"sqlite3",
+    "Database":"./bot.sqlite"
 }

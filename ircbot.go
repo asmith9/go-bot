@@ -31,6 +31,7 @@ type Configuration struct {
 }
 
 func init() {
+    // Set up the logger
     logger, err := log.LoggerFromConfigAsFile("logging.xml")
 
     if err != nil {
@@ -63,6 +64,7 @@ func main() {
     con.UseTLS = conf.SSL
     err = con.Connect(conf.Server)
     checkErr(err, "Failed to connect to IRC server")
+    defer con.Disconnect()
 
     log.Info("Connected: ", conf.Server)
     // When we've connected to the IRC server, go join the room!

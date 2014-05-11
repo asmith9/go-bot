@@ -3,10 +3,10 @@ package main
 import (
     "code.google.com/p/go.net/html"
     "encoding/json"
+    log "github.com/cihub/seelog"
     "github.com/thoj/go-ircevent"
     "io"
     "io/ioutil"
-    "log"
     "net/http"
     "os"
     "regexp"
@@ -14,13 +14,14 @@ import (
 )
 
 type Configuration struct {
-    Server      string
-    SSL         bool
-    Nick        string
-    Username    string
-    RoomName    string
-    IgnoreRegex string
-    Debug       bool
+    Server       string
+    SSL          bool
+    Nick         string
+    Username     string
+    RoomName     string
+    IgnoreRegex  string
+    Debug        bool
+    HelloMessage string
 }
 
 type URLHistory struct {
@@ -30,42 +31,56 @@ type URLHistory struct {
     Who  string
 }
 
-// Set up Logger
-var l = log.New(os.Stdout, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+func init() {
+    logger, err := log.LoggerFromConfigAsFile("logging.xml")
+
+    if err != nil {
+        log.Debug(err)
+        return
+    }
+
+    log.ReplaceLogger(logger)
+    return
+}
 
 func main() {
+    defer log.Flush()
     // Load Configuration
     file, _ := os.Open("conf.json")
     decoder := json.NewDecoder(file)
     conf := Configuration{}
     err := decoder.Decode(&conf)
     if err != nil {
-        l.Print("error:", err)
+        log.Debug("Error reading config file: ", err)
+        return
     }
 
-    l.Print("Starting up.")
+    log.Info("Starting up, connecting to ", conf.Server, " as ", conf.Nick)
 
+    // Connect to IRC server
     con := irc.IRC(conf.Nick, conf.Username)
     con.Debug = conf.Debug
     con.UseTLS = conf.SSL
     err = con.Connect(conf.Server)
 
     if err != nil {
-        l.Print("Failed connection")
+        log.Debug("Failed connection: ", err)
         return
     }
 
-    l.Print("Connected.", conf.Server)
+    log.Info("Connected: ", conf.Server)
     // When we've connected to the IRC server, go join the room!
     con.AddCallback("001", func(e *irc.Event) {
         con.Join(conf.RoomName)
+        log.Info("Joined room ", conf.RoomName)
     })
 
-    /* Say something on arrival
-       con.AddCallback("JOIN", func(e *irc.Event) {
-           con.Privmsg(conf.RoomName, "Hello!")
-       }) */
-
+    if conf.HelloMessage != "" {
+        // Say something on arrival
+        con.AddCallback("JOIN", func(e *irc.Event) {
+            con.Privmsg(conf.RoomName, conf.HelloMessage)
+        })
+    }
     // Check each message to see if it contains a URL, and return the title
     con.AddCallback("PRIVMSG", func(e *irc.Event) {
         // Regex to catch web URLs.
@@ -81,29 +96,25 @@ func main() {
                 // We found a URL.  Fetch the page
                 resp, err := http.Get(matched)
                 if err != nil {
-                    // Problem getting the page
-                    l.Print("%s", err)
+                    log.Debug(err)
                 } else {
                     // Wait until finished getting the content
                     defer resp.Body.Close()
                     contents, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<18))
-                    //contents := io.LimitReader(resp.Body, 2048)
                     if err != nil {
-                        // Had a problem fetching the page
-                        l.Printf("%s", err)
+                        log.Debug(err)
                     } else if resp.StatusCode != 200 {
-                        l.Printf("%s returned %s", matched, resp.Status)
+                        log.Debug(matched, "returned with status code:", resp.Status)
                     } else {
                         // Find the title from the page, log and send it to IRC channel
                         title := getTitle(string(contents))
-                        l.Print("Went to ", matched, " got title ", title)
-                        // Maybe look into how I can make this bot use more than one room?
+                        log.Debug("Went to ", matched, " got title ", title)
                         con.Privmsg(conf.RoomName, title)
                     }
                 }
             }
         } else {
-            l.Print("Message is from ignored user, ", ignoreIt)
+            log.Info("Message is from ignored user, ", ignoreIt)
         }
     })
     // Let's just keep on keeping on

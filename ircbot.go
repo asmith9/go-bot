@@ -14,6 +14,7 @@ import (
     "os"
     "regexp"
     "strings"
+    "time"
 )
 
 type Configuration struct {
@@ -53,7 +54,7 @@ func main() {
     log.Info("Starting up, connecting to ", conf.Server, " as ", conf.Nick)
 
     // Connect to database
-    db := initDb()
+    db := initDb(conf)
     defer db.Db.Close()
 
     // Connect to IRC server
@@ -82,7 +83,7 @@ func main() {
         var webaddress = regexp.MustCompile("http(s)?\\S*")
         var ignoreRegex = regexp.MustCompile(conf.IgnoreRegex)
 
-        ignoreIt := ignoreRegex.FindString(strings.ToLower(e.Message()))
+        ignoreIt := ignoreRegex.FindString(strings.ToLower(e.Nick))
 
         if ignoreIt == "" {
             matched := webaddress.FindString(e.Message())
@@ -105,6 +106,10 @@ func main() {
                         title := getTitle(string(contents))
                         log.Debug("Went to ", matched, " got title ", title)
                         con.Privmsg(conf.RoomName, title)
+                        log.Debug("Adding entry to database")
+                        url := newURL(matched, e.Nick)
+                        err = db.Insert(&url)
+                        checkErr(err, "Insert Failed!")
                     }
                 }
             }
@@ -139,17 +144,17 @@ func getTitle(body string) string {
     return title
 }
 
-type URLHistory struct {
+type URL struct {
     Id   int
     URL  string
-    Date string
+    Date int64
     Who  string
 }
 
-func initDb() *gorp.DbMap {
+func initDb(conf Configuration) *gorp.DbMap {
     // connect to db using standard Go database/sql API
     // use whatever database/sql driver you wish
-    db, err := sql.Open("sqlite3", "/tmp/post_db.bin")
+    db, err := sql.Open(conf.Driver, conf.Database)
     checkErr(err, "sql.Open failed")
 
     // construct a gorp DbMap
@@ -157,7 +162,7 @@ func initDb() *gorp.DbMap {
 
     // add a table, setting the table name to 'posts' and
     // specifying that the Id property is an auto incrementing PK
-    dbmap.AddTableWithName(URLHistory{}, "urls").SetKeys(true, "Id")
+    dbmap.AddTableWithName(URL{}, "urls").SetKeys(true, "Id")
 
     // create the table. in a production system you'd generally
     // use a migration tool, or create the tables via scripts
@@ -165,6 +170,14 @@ func initDb() *gorp.DbMap {
     checkErr(err, "Create tables failed")
 
     return dbmap
+}
+
+func newURL(url, who string) URL {
+    return URL{
+        Date: time.Now().UnixNano(),
+        URL:  url,
+        Who:  who,
+    }
 }
 
 func checkErr(err error, msg string) {

@@ -30,6 +30,13 @@ type Configuration struct {
     Database     string
 }
 
+type URL struct {
+    URL   string
+    Date  int64
+    Who   string
+    Title string
+}
+
 func init() {
     // Set up the logger
     logger, err := log.LoggerFromConfigAsFile("logging.xml")
@@ -45,19 +52,21 @@ func init() {
 
 func main() {
     defer log.Flush()
+
     // Load Configuration
     file, _ := os.Open("conf.json")
     decoder := json.NewDecoder(file)
     conf := Configuration{}
     err := decoder.Decode(&conf)
     checkErr(err, "Failed to read configuarion")
-
-    log.Info("Starting up, connecting to ", conf.Server, " as ", conf.Nick)
+    defer file.Close()
 
     // Connect to database
+    log.Debug("Connecting to Database")
     db := initDb(conf)
     defer db.Db.Close()
 
+    log.Debug("Starting up, connecting to ", conf.Server, " as ", conf.Nick)
     // Connect to IRC server
     con := irc.IRC(conf.Nick, conf.Username)
     con.Debug = conf.Debug
@@ -66,32 +75,48 @@ func main() {
     checkErr(err, "Failed to connect to IRC server")
     defer con.Disconnect()
 
-    log.Info("Connected: ", conf.Server)
     // When we've connected to the IRC server, go join the room!
+    log.Info("Connected: ", conf.Server)
     con.AddCallback("001", func(e *irc.Event) {
         con.Join(conf.RoomName)
         log.Info("Joined room ", conf.RoomName)
     })
 
+    // Say something on arrival
     if conf.HelloMessage != "" {
-        // Say something on arrival
         con.AddCallback("JOIN", func(e *irc.Event) {
             con.Privmsg(conf.RoomName, conf.HelloMessage)
         })
     }
     // Check each message to see if it contains a URL, and return the title
     con.AddCallback("PRIVMSG", func(e *irc.Event) {
-        // Regex to catch web URLs.
-        var webaddress = regexp.MustCompile("http(s)?\\S*")
-        var ignoreRegex = regexp.MustCompile(conf.IgnoreRegex)
+        go urlHandler(conf, e, con, db)
+    })
+    // Let's just keep on keeping on
+    con.Loop()
+}
 
-        ignoreIt := ignoreRegex.FindString(strings.ToLower(e.Nick))
+func urlHandler(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp.DbMap) {
+    // Regex to catch web URLs.
+    var webaddress = regexp.MustCompile("http(s)?\\S*")
+    var ignoreRegex = regexp.MustCompile(conf.IgnoreRegex)
 
-        if ignoreIt == "" {
-            matched := webaddress.FindString(e.Message())
+    ignoreIt := ignoreRegex.FindString(strings.ToLower(e.Nick))
 
-            if matched != "" {
-                // We found a URL.  Fetch the page
+    if ignoreIt == "" {
+        matched := webaddress.FindString(e.Message())
+
+        if matched != "" {
+            // We found a URL, first check if it already exists
+            obj, err := db.Get(URL{}, matched)
+            checkErr(err, "Error requesting URL from database")
+
+            if obj != nil {
+                log.Debug("Returning title from database")
+                url := obj.(*URL)
+                con.Privmsg(conf.RoomName, url.Title)
+            } else {
+                // We found a URL that isn't in the database, fetch it
                 resp, err := http.Get(matched)
                 if err != nil {
                     log.Debug(err)
@@ -109,18 +134,17 @@ func main() {
                         log.Debug("Went to ", matched, " got title ", title)
                         con.Privmsg(conf.RoomName, title)
                         log.Debug("Adding entry to database")
-                        url := newURL(matched, e.Nick)
+                        url := newURL(matched, e.Nick, title)
                         err = db.Insert(&url)
                         checkErr(err, "Insert Failed!")
                     }
                 }
             }
-        } else {
-            log.Info("Message is from ignored user, ", ignoreIt)
         }
-    })
-    // Let's just keep on keeping on
-    con.Loop()
+    } else {
+        log.Info("Message is from ignored user, ", ignoreIt)
+    }
+    return
 }
 
 func getTitle(body string) string {
@@ -146,13 +170,6 @@ func getTitle(body string) string {
     return title
 }
 
-type URL struct {
-    Id   int
-    URL  string
-    Date int64
-    Who  string
-}
-
 func initDb(conf Configuration) *gorp.DbMap {
     // connect to db using standard Go database/sql API
     // use whatever database/sql driver you wish
@@ -164,7 +181,7 @@ func initDb(conf Configuration) *gorp.DbMap {
 
     // add a table, setting the table name to 'posts' and
     // specifying that the Id property is an auto incrementing PK
-    dbmap.AddTableWithName(URL{}, "urls").SetKeys(true, "Id")
+    dbmap.AddTableWithName(URL{}, "urls").SetKeys(false, "URL")
 
     // create the table. in a production system you'd generally
     // use a migration tool, or create the tables via scripts
@@ -174,11 +191,12 @@ func initDb(conf Configuration) *gorp.DbMap {
     return dbmap
 }
 
-func newURL(url, who string) URL {
+func newURL(url, who, title string) URL {
     return URL{
-        Date: time.Now().UnixNano(),
-        URL:  url,
-        Who:  who,
+        Date:  time.Now().UnixNano(),
+        URL:   url,
+        Who:   who,
+        Title: title,
     }
 }
 

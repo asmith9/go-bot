@@ -112,30 +112,47 @@ func urlHandler(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp.
             checkErr(err, "Error requesting URL from database")
 
             if obj != nil {
-                log.Debug("Returning title from database")
+                log.Debug("Found URL in the database")
                 url := obj.(*URL)
-                con.Privmsg(conf.RoomName, url.Title)
+                if (time.Now().Unix() - url.Date) < 86400 { // 86400 seconds = 1 day
+                    log.Debug("Title in database is fresh enough")
+                    message := url.Title + ".  Originally posted by: " + url.Who
+                    con.Privmsg(conf.RoomName, message)
+                    return
+                }
+                log.Debug("Title in database isn't fresh enough")
+            }
+            // We need to fetch an up to date title
+            resp, err := http.Get(matched)
+            if err != nil {
+                log.Debug(err)
             } else {
-                // We found a URL that isn't in the database, fetch it
-                resp, err := http.Get(matched)
+                // Wait until finished getting the content
+                defer resp.Body.Close()
+                contents, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<18))
                 if err != nil {
                     log.Debug(err)
+                } else if resp.StatusCode != 200 {
+                    log.Debug(matched, "returned with status code:", resp.Status)
                 } else {
-                    // Wait until finished getting the content
-                    defer resp.Body.Close()
-                    contents, err := ioutil.ReadAll(io.LimitReader(resp.Body, 1<<18))
-                    if err != nil {
-                        log.Debug(err)
-                    } else if resp.StatusCode != 200 {
-                        log.Debug(matched, "returned with status code:", resp.Status)
+                    // Find the title from the page, log and send it to IRC channel
+                    title := getTitle(string(contents))
+                    log.Debug("Went to ", matched, " got title ", title)
+                    con.Privmsg(conf.RoomName, title)
+                    if obj != nil {
+                        log.Debug("Updating entry in database")
+                        url := newURL(matched, e.Nick, title)
+                        _, err := db.Update(&url)
+                        checkErr(err, "Update Failed!")
                     } else {
-                        // Find the title from the page, log and send it to IRC channel
-                        title := getTitle(string(contents))
-                        log.Debug("Went to ", matched, " got title ", title)
-                        con.Privmsg(conf.RoomName, title)
                         log.Debug("Adding entry to database")
                         url := newURL(matched, e.Nick, title)
-                        err = db.Insert(&url)
+                        if obj != nil {
+                            err = db.Insert(&url)
+                        } else {
+                            err = db.Insert(&url)
+                        }
+
                         checkErr(err, "Insert Failed!")
                     }
                 }
@@ -193,7 +210,7 @@ func initDb(conf Configuration) *gorp.DbMap {
 
 func newURL(url, who, title string) URL {
     return URL{
-        Date:  time.Now().UnixNano(),
+        Date:  time.Now().Unix(),
         URL:   url,
         Who:   who,
         Title: title,

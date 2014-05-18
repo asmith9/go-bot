@@ -13,6 +13,7 @@ import (
     "net/http"
     "os"
     "regexp"
+    "strconv"
     "strings"
     "time"
 )
@@ -37,6 +38,12 @@ type URL struct {
     Title string
 }
 
+type Seen struct {
+    Who     string
+    Date    int64
+    Message string
+}
+
 func init() {
     // Set up the logger
     logger, err := log.LoggerFromConfigAsFile("logging.xml")
@@ -54,12 +61,13 @@ func main() {
     defer log.Flush()
 
     // Load Configuration
-    file, _ := os.Open("conf.json")
-    decoder := json.NewDecoder(file)
-    conf := Configuration{}
-    err := decoder.Decode(&conf)
+    file, err := os.Open("conf.json")
     checkErr(err, "Failed to read configuarion")
     defer file.Close()
+    decoder := json.NewDecoder(file)
+    conf := Configuration{}
+    err = decoder.Decode(&conf)
+    checkErr(err, "Failed to read configuarion")
 
     // Connect to database
     log.Debug("Connecting to Database")
@@ -92,8 +100,70 @@ func main() {
     con.AddCallback("PRIVMSG", func(e *irc.Event) {
         go urlHandler(conf, e, con, db)
     })
+    // Keep updated on last time an individual was seen
+    con.AddCallback("PRIVMSG", func(e *irc.Event) {
+        go seenHandler(e, con, db)
+    })
+    // Keep updated on last time an individual was seen
+    con.AddCallback("PRIVMSG", func(e *irc.Event) {
+        go seenRequest(conf, e, con, db)
+    })
     // Let's just keep on keeping on
     con.Loop()
+}
+
+func seenHandler(e *irc.Event, con *irc.Connection, db *gorp.DbMap) {
+    /* This function is pretty lightweight but does involve
+       a db write per message received.  As I have the db layer there
+       i'm going to use it for now, but it might be worth just doing this in-memory.
+       In memory shouldn't get too large, unless the bot is coming in to contact
+       with an extremely large number of users.  It does mean it would forget everything after
+       each restart, unless I came up with a background process to flush to disk periodically. */
+    obj, err := db.Get(Seen{}, e.Nick)
+    checkErr(err, "Error requesting user from database")
+    if obj != nil {
+        log.Debug("User found in db, updating entry")
+        seen := newSeen(e.Nick, e.Message())
+        _, err := db.Update(&seen)
+        checkErr(err, "Update Failed!")
+    } else {
+        log.Debug("User wasn't found in db, adding new record")
+        seen := newSeen(e.Nick, e.Message())
+        err := db.Insert(&seen)
+        checkErr(err, "Update Failed!")
+    }
+    return
+}
+
+func seenRequest(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp.DbMap) {
+    /* Return details of the last time a nick was seen in channel, if possible */
+
+    // We're only interested in messages starting with #seen
+    if strings.HasPrefix(strings.ToLower(e.Message()), "#seen") {
+        log.Debug("Message started with #seen")
+        users := strings.SplitAfter(e.Message(), "#seen ")
+        for i := range users {
+            if i == 0 {
+                continue
+            }
+            obj, err := db.Get(Seen{}, users[i])
+            checkErr(err, "Error requesting user from database")
+            if obj != nil {
+                log.Debug("Found user ", users[i], " in the database")
+                seen := obj.(*Seen)
+                lastSeen := time.Now().Unix() - seen.Date
+                hours := strconv.FormatInt(int64(time.Duration(lastSeen)*time.Second/time.Hour), 10)
+                minutes := strconv.FormatInt(int64(time.Duration(lastSeen)*time.Second/time.Minute), 10)
+                message := e.Nick + ": " + users[i] + " was last seen " + hours + " hours, and " + minutes + " minutes ago."
+                con.Privmsg(conf.RoomName, message)
+            } else {
+                log.Debug("Didn't find user ", users[i], " in the database")
+                message := e.Nick + ": Sorry, I have never seen " + users[i] + " before"
+                con.Privmsg(conf.RoomName, message)
+            }
+        }
+    }
+    return
 }
 
 func urlHandler(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp.DbMap) {
@@ -110,7 +180,6 @@ func urlHandler(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp.
             // We found a URL, first check if it already exists
             obj, err := db.Get(URL{}, matched)
             checkErr(err, "Error requesting URL from database")
-
             if obj != nil {
                 log.Debug("Found URL in the database")
                 url := obj.(*URL)
@@ -199,6 +268,7 @@ func initDb(conf Configuration) *gorp.DbMap {
     // add a table, setting the table name to 'posts' and
     // specifying that the Id property is an auto incrementing PK
     dbmap.AddTableWithName(URL{}, "urls").SetKeys(false, "URL")
+    dbmap.AddTableWithName(Seen{}, "seen").SetKeys(false, "Who")
 
     // create the table. in a production system you'd generally
     // use a migration tool, or create the tables via scripts
@@ -217,8 +287,16 @@ func newURL(url, who, title string) URL {
     }
 }
 
+func newSeen(who, message string) Seen {
+    return Seen{
+        Date:    time.Now().Unix(),
+        Who:     who,
+        Message: message,
+    }
+}
+
 func checkErr(err error, msg string) {
     if err != nil {
-        log.Critical(msg, err)
+        log.Critical(msg, " ", err)
     }
 }

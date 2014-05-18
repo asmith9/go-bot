@@ -13,7 +13,6 @@ import (
     "net/http"
     "os"
     "regexp"
-    "strconv"
     "strings"
     "time"
 )
@@ -151,10 +150,8 @@ func seenRequest(conf Configuration, e *irc.Event, con *irc.Connection, db *gorp
             if obj != nil {
                 log.Debug("Found user ", users[i], " in the database")
                 seen := obj.(*Seen)
-                lastSeen := time.Now().Unix() - seen.Date
-                hours := strconv.FormatInt(int64(time.Duration(lastSeen)*time.Second/time.Hour), 10)
-                minutes := strconv.FormatInt(int64(time.Duration(lastSeen)*time.Second/time.Minute), 10)
-                message := e.Nick + ": " + users[i] + " was last seen " + hours + " hours, and " + minutes + " minutes ago."
+                lastSeen := time.Duration(time.Now().Unix()-seen.Date) * time.Second
+                message := e.Nick + ": " + users[i] + " was last seen " + lastSeen.String() + " ago."
                 con.Privmsg(conf.RoomName, message)
             } else {
                 log.Debug("Didn't find user ", users[i], " in the database")
